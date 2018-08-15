@@ -4,6 +4,12 @@ import tensorflow as tf
 from common.distributions import make_pdtype
 from common.mpi_running_mean_std import RunningMeanStd
 
+
+def xavier_init(size):
+    in_dim = size[0]
+    xavier_stddev = 1. / tf.sqrt(in_dim / 2.)
+    return tf.random_normal(shape=size, stddev=xavier_stddev)
+
 class MlpPolicy(object):
     recurrent = False
     def __init__(self, name, reuse=False, *args, **kwargs):
@@ -17,9 +23,8 @@ class MlpPolicy(object):
         self.pdtype = pdtype = make_pdtype(ac_space.shape[0])
         batch_size = None
 
-        ob = U.get_placeholder(name="ob", dtype=tf.float32, shape=[batch_size, obs_space.shape[0]])
-        embedding = U.get_placeholder(name="embedding", dtype=tf.float32, shape=[batch_size, embedding_shape]) ##这里我觉得是一个embedding 的值扩展成sequence_len大小，暂时先不管，等具体做到这里的时候再处理
-
+        ob = U.get_placeholder(name="ac_de_ob", dtype=tf.float32, shape=[batch_size, obs_space.shape[0]])
+        embedding = U.get_placeholder(name="ac_de_embedding", dtype=tf.float32, shape=[batch_size, embedding_shape]) ##这里我觉得是一个embedding 的值扩展成sequence_len大小，暂时先不管，等具体做到
         # 正则化一下
         last_out = U.concatenate([ob, embedding], axis=1)
         with tf.variable_scope("ac_de_filter"):
@@ -28,9 +33,9 @@ class MlpPolicy(object):
         last_out = tf.clip_by_value((last_out - self.ac_rms.mean) / self.ac_rms.std, -5.0, 5.0)
 
         for i in range(num_hid_layers):
-            last_out = tf.nn.tanh(U.dense(last_out, hid_size[i], "ac_de%i"%(i+1), weight_init=U.normc_initializer(1.0)))
+            last_out = tf.nn.relu(U.dense(last_out, hid_size[i], "ac_de%i"%(i+1), weight_init= U.normc_initializer(1.0)))
         if gaussian_fixed_var and isinstance(ac_space.shape[0], int):
-            self.mean = U.dense(last_out, pdtype.param_shape()[0]//2, "ac_de_final", U.normc_initializer(0.01))
+            self.mean = U.dense(last_out, pdtype.param_shape()[0]//2, "ac_de_final", U.normc_initializer(1.0))
             logstd = tf.get_variable(name="logstd", shape=[1, pdtype.param_shape()[0]//2], initializer=tf.zeros_initializer())
             pdparam = U.concatenate([self.mean, self.mean * 0.0 + logstd], axis=1)
         else:

@@ -15,6 +15,11 @@ def create_variable(name, shape):
     return variable
 
 
+# def xavier_init(size): # add for initial
+#     in_dim = size[0]
+#     xavier_stddev = 1. / tf.sqrt(in_dim / 2.)
+#     return tf.random_normal(shape=size, stddev=xavier_stddev)
+
 def create_embedding_table(name, shape):
     if shape[0] == shape[1]:
         # Make a one-hot encoding as the initial value.
@@ -351,74 +356,18 @@ class WaveNetModel(object):
         #input_cut = tf.shape(input_batch)[1] - tf.shape(transformed)[1] #
         input_cut = input_batch.shape[1] - transformed.shape[1]
         input_batch = tf.slice(input_batch, [0, input_cut.value, 0], [-1, -1, -1])
-
         return skip_contribution, input_batch + transformed
 
-    # def _generator_conv(self, input_batch, state_batch, weights):
-    #     '''Perform convolution for a single convolutional processing step.'''
-    #     # TODO generalize to filter_width > 2
-    #     past_weights = weights[0, :, :]
-    #     curr_weights = weights[1, :, :]
-    #     output = tf.matmul(state_batch, past_weights) + tf.matmul(
-    #         input_batch, curr_weights)
-    #     return output
-
-    # def _generator_causal_layer(self, input_batch, state_batch):
-    #     with tf.name_scope('causal_layer'):
-    #         weights_filter = self.variables['causal_layer']['filter']
-    #         output = self._generator_conv(
-    #             input_batch, state_batch, weights_filter)
-    #     return output
-
-    # def _generator_dilation_layer(self, input_batch, state_batch, layer_index,
-    #                               dilation, global_condition_batch):
-    #     variables = self.variables['dilated_stack'][layer_index]
-    #
-    #     weights_filter = variables['filter']
-    #     weights_gate = variables['gate']
-    #     output_filter = self._generator_conv(
-    #         input_batch, state_batch, weights_filter)
-    #     output_gate = self._generator_conv(
-    #         input_batch, state_batch, weights_gate)
-    #
-    #     if global_condition_batch is not None:
-    #         global_condition_batch = tf.reshape(global_condition_batch,
-    #                                             shape=(1, -1))
-    #         weights_gc_filter = variables['gc_filtweights']
-    #         weights_gc_filter = weights_gc_filter[0, :, :]
-    #         output_filter += tf.matmul(global_condition_batch,
-    #                                    weights_gc_filter)
-    #         weights_gc_gate = variables['gc_gateweights']
-    #         weights_gc_gate = weights_gc_gate[0, :, :]
-    #         output_gate += tf.matmul(global_condition_batch,
-    #                                  weights_gc_gate)
-    #
-    #     if self.use_biases:
-    #         output_filter = output_filter + variables['filter_bias']
-    #         output_gate = output_gate + variables['gate_bias']
-    #
-    #     out = tf.tanh(output_filter) * tf.sigmoid(output_gate)
-    #
-    #     weights_dense = variables['dense']
-    #     transformed = tf.matmul(out, weights_dense[0, :, :])
-    #     if self.use_biases:
-    #         transformed = transformed + variables['dense_bias']
-    #
-    #     weights_skip = variables['skip']
-    #     skip_contribution = tf.matmul(out, weights_skip[0, :, :])
-    #     if self.use_biases:
-    #         skip_contribution = skip_contribution + variables['skip_bias']
-    #
-    #     return skip_contribution, input_batch + transformed
 
     def _create_network(self, obs_shape, embedding_shape): ## , input_batch, global_condition_batch
         '''Construct the WaveNet network.'''
         import common.tf_util as U
         outputs = []
         sequence_length = 1
-        input_batch = U.get_placeholder(name="obss", dtype=tf.float32, shape=[batch_size, self.time_steps , obs_shape.shape[0]])  ##input_batch是3D的
-        global_condition_batch = U.get_placeholder(name="embeddingss", dtype=tf.float32, shape=[batch_size, 1, embedding_shape])  ##[batch_size, 1, embedding_shape]
-        current_layer = input_batch ## batch_size = 4
+        input_batch = U.get_placeholder(name="state_de_ob", dtype=tf.float32, shape=[batch_size, self.time_steps - 1 , obs_shape.shape[0]])  ##input_batch是3D的
+        global_condition_batch = U.get_placeholder(name="state_de_embedding", dtype=tf.float32,
+                                                   shape=[batch_size, 1, embedding_shape])
+        current_layer = input_batch
 
         # Pre-process the input with a regular convolution
         current_layer = self._create_causal_layer(current_layer) ##这里不行
@@ -461,190 +410,27 @@ class WaveNetModel(object):
             conv2 = tf.nn.conv1d(transformed2, w2, stride=1, padding="SAME")
             if self.use_biases:
                 conv2 = tf.add(conv2, b2)
-            print(conv2)
+            # print(conv2)
             # ========= add by myself =============== #
-            mean = tf.reduce_mean(conv2, axis=1) ###去均值作为每一个维度的
-            logstd = tf.get_variable(name="wave_logstd", shape=[1, self.pdtype.param_shape()[0]//2], initializer=tf.zeros_initializer())
-            pdparam = U.concatenate([mean, mean * 0.0 + logstd], axis=1)
-            self.pd = self.pdtype.pdfromflat(pdparam)
-
+            # self.mean = tf.reduce_mean(conv2, axis=1) ###去均值作为每一个维度的
+            # self.logstd = tf.get_variable(name="wave_logstd", shape=[1, self.pdtype.param_shape()[0]//2], initializer=tf.zeros_initializer())
+            # pdparam = U.concatenate([self.mean, self.mean * 0.0 + self.logstd], axis=1)
+            # self.pd = self.pdtype.pdfromflat(pdparam)
+            #
+            # self._act = U.function([input_batch, global_condition_batch], [self.pd.sample()])
+            # # for debug
+            # self.get_mean = U.function([input_batch, global_condition_batch], self.mean)
+            conv2 = tf.reshape(conv2, [-1, self.quantization_channels])
+            self.mean =U.dense(conv2, 63, "wave_mean", U.normc_initializer(1.0)) ## 48 * 63
+            self.logstd = U.dense(conv2, 63, "wave_logstd", weight_init= U.normc_initializer(1.0)) ## 48 * 63
+            # self.logstd = tf.get_variable(name="wave_logstd", shape=[1, self.pdtype.param_shape()[0] // 2],
+            #                               initializer=tf.zeros_initializer())  ## 这个地方的大小有待商榷
+            pdparm = U.concatenate([self.mean, self.mean * 0.0 + self.logstd], axis=1)
+            self.pd = self.pdtype.pdfromflat(pdparm)
+            # target_output = tf.slice(input_batch, [0, self.receptive_field, 0], [-1, -1, -1])
             self._act = U.function([input_batch, global_condition_batch], [self.pd.sample()])
 
-    #    return self.pd.sample()  # conv2
 
-    # def _create_generator(self, input_batch, global_condition_batch):
-    #     '''Construct an efficient incremental generator.'''
-    #     init_ops = []
-    #     push_ops = []
-    #     outputs = []
-    #     current_layer = input_batch
-    #
-    #     q = tf.FIFOQueue(
-    #         1,
-    #         dtypes=tf.float32,
-    #         shapes=(self.batch_size, self.quantization_channels))
-    #     init = q.enqueue_many(
-    #         tf.zeros((1, self.batch_size, self.quantization_channels)))
-    #
-    #     current_state = q.dequeue()
-    #     push = q.enqueue([current_layer])
-    #     init_ops.append(init)
-    #     push_ops.append(push)
-    #
-    #     current_layer = self._generator_causal_layer(
-    #                         current_layer, current_state)
-    #
-    #     # Add all defined dilation layers.
-    #     with tf.name_scope('dilated_stack'):
-    #         for layer_index, dilation in enumerate(self.dilations):
-    #             with tf.name_scope('layer{}'.format(layer_index)):
-    #
-    #                 q = tf.FIFOQueue(
-    #                     dilation,
-    #                     dtypes=tf.float32,
-    #                     shapes=(self.batch_size, self.residual_channels))
-    #                 init = q.enqueue_many(
-    #                     tf.zeros((dilation, self.batch_size,
-    #                               self.residual_channels)))
-    #
-    #                 current_state = q.dequeue()
-    #                 push = q.enqueue([current_layer])
-    #                 init_ops.append(init)
-    #                 push_ops.append(push)
-    #
-    #                 output, current_layer = self._generator_dilation_layer(
-    #                     current_layer, current_state, layer_index, dilation,
-    #                     global_condition_batch)
-    #                 outputs.append(output)
-    #     self.init_ops = init_ops
-    #     self.push_ops = push_ops
-    #
-    #     with tf.name_scope('postprocessing'):
-    #         variables = self.variables['postprocessing']
-    #         # Perform (+) -> ReLU -> 1x1 conv -> ReLU -> 1x1 conv to
-    #         # postprocess the output.
-    #         w1 = variables['postprocess1']
-    #         w2 = variables['postprocess2']
-    #         if self.use_biases:
-    #             b1 = variables['postprocess1_bias']
-    #             b2 = variables['postprocess2_bias']
-    #
-    #         # We skip connections from the outputs of each layer, adding them
-    #         # all up here.
-    #         total = sum(outputs)
-    #         transformed1 = tf.nn.relu(total)
-    #
-    #         conv1 = tf.matmul(transformed1, w1[0, :, :])
-    #         if self.use_biases:
-    #             conv1 = conv1 + b1
-    #         transformed2 = tf.nn.relu(conv1)
-    #         conv2 = tf.matmul(transformed2, w2[0, :, :])
-    #         if self.use_biases:
-    #             conv2 = conv2 + b2
-    #
-    #     return conv2
-
-    # def _one_hot(self, input_batch):
-    #     '''One-hot encodes the waveform amplitudes.
-    #
-    #     This allows the definition of the network as a categorical distribution
-    #     over a finite set of possible amplitudes.
-    #     '''
-    #     with tf.name_scope('one_hot_encode'):
-    #         encoded = tf.one_hot(
-    #             input_batch,
-    #             depth=self.quantization_channels,
-    #             dtype=tf.float32)
-    #         shape = [self.batch_size, -1, self.quantization_channels]
-    #         encoded = tf.reshape(encoded, shape)
-    #     return encoded
-    #
-    # def _embed_gc(self, global_condition):
-    #     '''Returns embedding for global condition.
-    #     :param global_condition: Either ID of global condition for
-    #            tf.nn.embedding_lookup or actual embedding. The latter is
-    #            experimental.
-    #     :return: Embedding or None
-    #     '''
-    #     embedding = None
-    #     if self.global_condition_cardinality is not None:
-    #         # Only lookup the embedding if the global condition is presented
-    #         # as an integer of mutually-exclusive categories ...
-    #         embedding_table = self.variables['embeddings']['gc_embedding']
-    #         embedding = tf.nn.embedding_lookup(embedding_table,
-    #                                            global_condition)
-    #     elif global_condition is not None:
-    #         # ... else the global_condition (if any) is already provided
-    #         # as an embedding.
-    #
-    #         # In this case, the number of global_embedding channels must be
-    #         # equal to the the last dimension of the global_condition tensor.
-    #         gc_batch_rank = len(global_condition.get_shape())
-    #         dims_match = (global_condition.get_shape()[gc_batch_rank - 1] ==
-    #                       self.global_condition_channels)
-    #         if not dims_match:
-    #             raise ValueError('Shape of global_condition {} does not'
-    #                              ' match global_condition_channels {}.'.
-    #                              format(global_condition.get_shape(),
-    #                                     self.global_condition_channels))
-    #         embedding = global_condition
-    #
-    #     if embedding is not None:
-    #         embedding = tf.reshape(
-    #             embedding,
-    #             [self.batch_size, 1, self.global_condition_channels])
-    #
-    #     return embedding
-    #
-    # def predict_proba(self, waveform, global_condition=None, name='wavenet'):
-    #     '''Computes the probability distribution of the next sample based on
-    #     all samples in the input waveform.
-    #     If you want to generate audio by feeding the output of the network back
-    #     as an input, see predict_proba_incremental for a faster alternative.'''
-    #     with tf.name_scope(name):
-    #         if self.scalar_input:
-    #             encoded = tf.cast(waveform, tf.float32)
-    #             encoded = tf.reshape(encoded, [-1, 1])
-    #         else:
-    #             encoded = self._one_hot(waveform)
-    #
-    #         gc_embedding = self._embed_gc(global_condition)
-    #         raw_output = self._create_network(encoded, gc_embedding)
-    #         out = tf.reshape(raw_output, [-1, self.quantization_channels])
-    #         # Cast to float64 to avoid bug in TensorFlow
-    #         proba = tf.cast(
-    #             tf.nn.softmax(tf.cast(out, tf.float64)), tf.float32)
-    #         last = tf.slice(
-    #             proba,
-    #             [tf.shape(proba)[0] - 1, 0],
-    #             [1, self.quantization_channels])
-    #         return tf.reshape(last, [-1])
-    #
-    # def predict_proba_incremental(self, waveform, global_condition=None,
-    #                               name='wavenet'):
-    #     '''Computes the probability distribution of the next sample
-    #     incrementally, based on a single sample and all previously passed
-    #     samples.'''
-    #     if self.filter_width > 2:
-    #         raise NotImplementedError("Incremental generation does not "
-    #                                   "support filter_width > 2.")
-    #     if self.scalar_input:
-    #         raise NotImplementedError("Incremental generation does not "
-    #                                   "support scalar input yet.")
-    #     with tf.name_scope(name):
-    #         encoded = tf.one_hot(waveform, self.quantization_channels)
-    #         encoded = tf.reshape(encoded, [-1, self.quantization_channels])
-    #         gc_embedding = self._embed_gc(global_condition)
-    #         raw_output = self._create_generator(encoded, gc_embedding)
-    #         out = tf.reshape(raw_output, [-1, self.quantization_channels])
-    #         proba = tf.cast(
-    #             tf.nn.softmax(tf.cast(out, tf.float64)), tf.float32)
-    #         last = tf.slice(
-    #             proba,
-    #             [tf.shape(proba)[0] - 1, 0],
-    #             [1, self.quantization_channels])
-    #         return tf.reshape(last, [-1])
-    #
     # def loss(self,
     #          input_batch,
     #          global_condition_batch=None,
@@ -721,4 +507,5 @@ class WaveNetModel(object):
 
     def get_outputs(self, obs, embedding):
         ac1 = self._act(obs, embedding)
+        # mean = self.get_mean(obs, embedding)
         return ac1[0]

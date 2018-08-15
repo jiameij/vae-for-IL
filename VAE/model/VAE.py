@@ -47,9 +47,9 @@ def get_arguments():
         return {'true': True, 'false': False}[s.lower()]
 
     parser = argparse.ArgumentParser(description='VAE params')
-    parser.add_argument('--LSTM_size', type=int, default=300, help="bi_directional LSTM's hidden size")
-    parser.add_argument('--laten_size', type=int, default=30, help="the size of laten vector Z")
-    parser.add_argument('--time_steps', type=int, default=90, help="how many obs to lstm")
+    parser.add_argument('--LSTM_size', type=int, default=500, help="bi_directional LSTM's hidden size")
+    parser.add_argument('--laten_size', type=int, default=60, help="the size of laten vector Z")
+    parser.add_argument('--time_steps', type=int, default=56, help="how many obs to lstm")
     parser.add_argument('--lstm_batch', type = int, default=1, help="lstm batch size")
     parser.add_argument('--state_dir_path', type = str, default="/home/jmj/08/", help="path of demonstration data dir")
     parser.add_argument('--control_timestep', type=float, default=0.02, help="env.physic.control_timestep")
@@ -97,7 +97,7 @@ def get_arguments():
                         'adam optimizer. Default: ' + str(MOMENTUM) + '.')
     parser.add_argument('--histograms', type=_str_to_bool, default=False,
                         help='Whether to store histogram summaries. Default: False')
-    parser.add_argument('--gc_channels', type=int, default=30,
+    parser.add_argument('--gc_channels', type=int, default=60,
                         help='Number of global condition channels. Default: None. Expecting: Int') #########gc_channels要注意一下
     parser.add_argument('--max_checkpoints', type=int, default=MAX_TO_KEEP,
                         help='Maximum amount of checkpoints that will be kept alive. Default: '
@@ -154,17 +154,25 @@ def load_state_dataset(data_dir_path, env, control_timestep):
     return state_dataset
 
 
-def learn(env, encoder, action_decorder, state_decorder, embedding_shape,*, dataset, optimizer, logdir, batch_size, time_steps, adam_epsilon = 0.001, lr_rate = 1e-3, vae_beta = 1):
+def get_ob_next_ac(env, ob__t, ac_t):
+    with env.physics.reset_context():
+        env.physics.data.qpos[:] = ob__t
+    env.step(ac_t)
+    return env.physics.data.qpos[:]
+
+
+def learn(env, encoder, action_decorder, state_decorder, embedding_shape,*, dataset, optimizer, logdir, batch_size, time_steps, adam_epsilon = 0.001, lr_rate = 1e-4, vae_beta = 8):
     lstm_encoder = encoder("lstm_encoder")
     ac_decoder = action_decorder("ac_decoder")
     state_decoder = state_decorder("state_decoder") #这个地方有问题
-    ob = U.get_placeholder_cached(name="ob")
-    obs = U.get_placeholder_cached(name="obs")  ##for encoder
-    obss = U.get_placeholder_cached(name="obss")  ## for action decoder， 这个state decoder是不是也可以用, 是不是应该改成obs
-    embedding = U.get_placeholder_cached(name="embedding")  ## for action decoder, 这个state decoder应该也是可以用的
-    embeddingss = U.get_placeholder_cached(name="embeddingss")
+    ac_de_ob = U.get_placeholder_cached(name="ac_de_ob")
+    en_ob = U.get_placeholder_cached(name="en_ob")  ##for encoder
+    state_de_ob = U.get_placeholder_cached(name="state_de_ob")  ## for action decoder， 这个state decoder是不是也可以用, 是不是应该改成obs
+    ac_de_embedding = U.get_placeholder_cached(name="ac_de_embedding")  ## for action decoder, 这个state decoder应该也是可以用的
+    state_de_embedding = U.get_placeholder_cached(name="state_de_embedding")
     # ac = ac_decoder.pdtype.sample_placeholder([None])
-    ob_next = tf.placeholder(name="ob_next", shape=[ob_shape], dtype=tf.float32)
+    ob_next = tf.placeholder(name="ob_next", shape=[None, ob_shape], dtype=tf.float32)
+    # ob_next_ac = tf.placeholder(name="ob_next_ac", shape=[ob_shape], dtype=tf.float32)
     # obs_out = state_decoder.pdtype.sample_placeholder([None])
 
     # p(z) 标准正太分布
@@ -174,13 +182,13 @@ def learn(env, encoder, action_decorder, state_decorder, embedding_shape,*, data
     p_z_params = U.concatenate([tf.zeros(shape=[embedding_shape], name="mean"), tf.zeros(shape=[embedding_shape], name="logstd")], axis=-1)
     p_z = p_z_pdtype.pdfromflat(p_z_params)
 
-    # recon_loss = -tf.reduce_mean(tf.reduce_sum(state_decoder.pd.logp(obs_out), axis=0)) ###这个地方不应该是obs_out,应该是真实的值
-    # recon_loss = -tf.reduce_mean(tf.reduce_sum(state_decoder.pd.logp(ob_next), axis=0)) ### 其实这里ob也是不对的,准确的来说应该是t+1时刻的ob
-    recon_loss =  -state_decoder.pd.logp(ob_next)[0]
-    # recon_loss = -tf.reduce_mean(tf.reduce_sum(ac_decoder.pd.logp(ac) + state_decoder.pd.logp(obs_out), axis=0)) ##这个地方还要再改
-    kl_loss = lstm_encoder.pd.kl(p_z)[0] ##p(z)：标准正太分布, 这个看起来是不是也不太对！！！！
-    kl_loss = tf.maximum(lstm_encoder.pd.kl(p_z)[0], tf.constant(5.00)) ##p(z)：标准正太分布, 这个看起来是不是也不太对！！！！
-    vae_loss = recon_loss + vae_beta * kl_loss ###vae_loss 应该是一个batch的
+    # recon_loss 里再加一个,对于action的
+
+    recon_loss =  -tf.reduce_sum(state_decoder.pd.logp(ob_next))
+    # kl_loss = lstm_encoder.pd.kl(p_z)[0] ##p(z)：标准正太分布, 这个看起来是不是也不太对！！！！
+    # kl_loss = tf.maximum(lstm_encoder.pd.kl(p_z)[0], tf.constant(5.00)) ##p(z)：标准正太分布, 这个看起来是不是也不太对！！！！
+    kl_loss = lstm_encoder.pd.kl(p_z)[0]
+    vae_loss = tf.reduce_mean(recon_loss + vae_beta * kl_loss) ###vae_loss 应该是一个batch的
 
     ep_stats = stats(["recon_loss", "kl_loss", "vae_loss"])
     losses = [recon_loss, kl_loss, vae_loss]
@@ -196,8 +204,8 @@ def learn(env, encoder, action_decorder, state_decorder, embedding_shape,*, data
     state_de_var_list = state_decoder.get_trainable_variables()
     var_list.extend(state_de_var_list)
     # compute_recon_loss = U.function([ob, obs, embedding, obss, embeddingss, ac, obs_out], recon_loss)
-    compute_losses = U.function([ob, obs, embedding, obss, embeddingss, ob_next], losses)
-    compute_grad = U.function([ob, obs, embedding, obss, embeddingss, ob_next], U.flatgrad(vae_loss, var_list)) ###这里没有想好！！！，可能是不对的！！
+    compute_losses = U.function([en_ob, ac_de_ob, state_de_ob, ac_de_embedding, state_de_embedding, ob_next], losses)
+    compute_grad = U.function([en_ob, ac_de_ob, state_de_ob, ac_de_embedding, state_de_embedding, ob_next], U.flatgrad(vae_loss, var_list)) ###这里没有想好！！！，可能是不对的！！
     adam = MpiAdam(var_list, epsilon=adam_epsilon)
 
 
@@ -212,40 +220,46 @@ def learn(env, encoder, action_decorder, state_decorder, embedding_shape,*, data
     saver_encoder = tf.train.Saver(var_list = en_var_list, max_to_keep=100)
     # saver_pol = tf.train.Saver(var_list=ac_de_var_list, max_to_keep=100) ##保留一下policy的参数，但是这个好像用不到哎
 
-    while True:
+    while iters_so_far < 50:
         ## 加多轮
         logger.log("********** Iteration %i ************" % iters_so_far)
         ## 要不要每一轮调整一下batch_size
         recon_loss_buffer = deque(maxlen=100)
+        # recon_loss2_buffer = deque(maxlen=100)
         kl_loss_buffer = deque(maxlen=100)
         vae_loss_buffer = deque(maxlen=100)
         # i = 0
         for obs_and_next in dataset.get_next_batch(batch_size=time_steps):
             # print(i)
             # i += 1
-            observations = obs_and_next[0].transpose((1, 0))
-            ob_next = obs_and_next[1]
-            embedding_now = lstm_encoder.get_laten_vector(observations)
-            embeddings = np.array([embedding_now for _ in range(time_steps)])
-            embeddings_reshape = embeddings.reshape((time_steps, -1))
-            # actions = ac_decoder.act(stochastic=True, ob=observations, embedding=embeddings_reshape)
-            state_outputs = state_decoder.get_outputs(observations.reshape(1, time_steps, -1), embedding_now.reshape((1, 1, -1))) ##还没有加混合高斯......乱加了一通，已经加完了
-            recon_loss, kl_loss, vae_loss = compute_losses(observations, observations.reshape(batch_size,time_steps,-1),embeddings_reshape,
-                              observations.reshape(1, time_steps, -1), embedding_now.reshape((1, 1, -1)), ob_next)
+            observations = obs_and_next[0].transpose((1, 0))[:-1]
+            ob_next = obs_and_next[0].transpose(1, 0)[state_decoder.receptive_field:, :]
+            embedding_now = lstm_encoder.get_laten_vector(obs_and_next[0].transpose((1, 0)))
+            embeddings = np.array([embedding_now for _ in range(time_steps - 1)])
+            embeddings_reshape = embeddings.reshape((time_steps-1, -1))
+            actions = ac_decoder.act(stochastic=True, ob=observations, embedding=embeddings_reshape)
+            ob_next_ac = get_ob_next_ac(env, observations[-1], actions[0]) ##这个还需要再修改 #########################################3
+            # state_outputs = state_decoder.get_outputs(observations.reshape(1, time_steps, -1), embedding_now.reshape((1, 1, -1))) ##还没有加混合高斯......乱加了一通，已经加完了
+            # recon_loss = state_decoder.recon_loss(observations.reshape(1, time_steps, -1), embedding_now.reshape((1, 1, -1)))
+            recon_loss,  kl_loss, vae_loss = compute_losses(obs_and_next[0].transpose((1, 0)).reshape(1, time_steps, -1), observations.reshape(time_steps-1,-1),
+                              observations.reshape(1, time_steps-1, -1), embeddings_reshape, embedding_now.reshape((1,1, -1)), ob_next)
 
-            g = compute_grad(observations, observations.reshape(batch_size,time_steps,-1),embeddings_reshape,
-                              observations.reshape(1, time_steps, -1), embedding_now.reshape((1, 1, -1)), ob_next)
-            logger.record_tabular("recon_loss", recon_loss)
-            logger.record_tabular("kl_loss", kl_loss)
-            logger.record_tabular("vae_loss", vae_loss)
-
+            g = compute_grad(obs_and_next[0].transpose((1, 0)).reshape(1, time_steps, -1), observations.reshape(time_steps-1,-1),
+                              observations.reshape(1, time_steps-1, -1), embeddings_reshape, embedding_now.reshape((1,1, -1)), ob_next)
+            # logger.record_tabular("recon_loss", recon_loss)
+            # logger.record_tabular("recon_loss2", recon_loss2)
+            # logger.record_tabular("kl_loss", kl_loss)
+            # logger.record_tabular("vae_loss", vae_loss)
+            # logger.dump_tabular()
             adam.update(g, lr_rate)
             recon_loss_buffer.append(recon_loss)
+            # recon_loss2_buffer.append(recon_loss2)
             kl_loss_buffer.append(kl_loss)
             vae_loss_buffer.append(vae_loss)
-        ep_stats.add_all_summary(writer, [np.mean(recon_loss_buffer), np.mean(kl_loss_buffer),
+        ep_stats.add_all_summary(writer, [np.mean(recon_loss_buffer),  np.mean(kl_loss_buffer),
                                           np.mean(vae_loss_buffer)], iters_so_far)
         logger.record_tabular("recon_loss", recon_loss)
+        # logger.record_tabular("recon_loss2", recon_loss2)
         logger.record_tabular("kl_loss", kl_loss)
         logger.record_tabular("vae_loss", vae_loss)
         logger.dump_tabular()
@@ -254,6 +268,8 @@ def learn(env, encoder, action_decorder, state_decorder, embedding_shape,*, data
             save(saver=saver_encoder, sess=tf.get_default_session(),logdir="./vae_saver", step=iters_so_far)
             # save(saver=saver_pol, sess=tf.get_default_session(), logdir="pol_saver", step=iters_so_far)
         iters_so_far += 1
+        if iters_so_far < 6:
+            lr_rate /= 2
 
 
 def train(args):

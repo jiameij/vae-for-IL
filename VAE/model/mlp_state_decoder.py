@@ -32,9 +32,9 @@ class MlpPolicy_state(object):
         for i in range(num_hid_layers):
             input_z = tf.nn.tanh(U.dense(input_z, hid_size[i], "state_de%i"%(i+1), weight_init=U.normc_initializer(1.0)))
         if gaussian_fixed_var and isinstance(obs_space.shape[0], int):
-            mean = U.dense(input_z, pdtype.param_shape()[0]//2, "state_de_final", U.normc_initializer(0.01))
-            logstd = tf.get_variable(name="logstd", shape=[1, pdtype.param_shape()[0]//2], initializer=tf.zeros_initializer())
-            pdparam = U.concatenate([mean, mean * 0.0 + logstd], axis=1)
+            self.mean = U.dense(input_z, pdtype.param_shape()[0]//2, "state_de_final", U.normc_initializer(0.01))
+            self.logstd = tf.get_variable(name="logstd", shape=[1, pdtype.param_shape()[0]//2], initializer=tf.zeros_initializer())
+            pdparam = U.concatenate([self.mean, self.mean * 0.0 + self.logstd], axis=1)
         else:
             pdparam = U.dense(last_out, pdtype.param_shape()[0], "state_de_final", U.normc_initializer(0.01))
 
@@ -44,9 +44,11 @@ class MlpPolicy_state(object):
         self.state_out = []
 
         self._act = U.function([ob_input, embedding], self.pd.sample())
+        self.get_mean = U.function([ob_input, embedding], self.mean)
 
     def get_outputs(self, ob, embedding):
         ac1 =  self._act(ob, embedding)
+        mean = self.get_mean(ob, embedding)
         return ac1
 
     def get_variables(self):

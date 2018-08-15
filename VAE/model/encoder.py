@@ -4,6 +4,12 @@ from tensorflow.contrib import rnn
 from common.distributions import make_pdtype
 from common.mpi_running_mean_std import RunningMeanStd
 
+
+def xavier_init(size):
+    in_dim = size[0]
+    xavier_stddev = 1. / tf.sqrt(in_dim / 2.)
+    return tf.random_normal(shape=size, stddev=xavier_stddev)
+
 class bi_direction_lstm(object):
     def __init__(self, name, reuse=False, *args, **kwargs):
         with tf.variable_scope(name):
@@ -14,7 +20,7 @@ class bi_direction_lstm(object):
 
     def _init(self, obs_space, batch_size, time_steps, LSTM_size, laten_size, gaussian_fixed_var=True): ##等会儿要重点看一下var有没有更新
         self.pdtype = pdtype = make_pdtype(laten_size)
-        obs = U.get_placeholder("obs", dtype=tf.float32, shape = [batch_size, time_steps, obs_space.shape[0]])
+        obs = U.get_placeholder("en_ob", dtype=tf.float32, shape = [batch_size, time_steps, obs_space.shape[0]])
         # 正则化
         with tf.variable_scope("obfilter"): ## 看看有没有起效果，我觉得是其效果考虑的
             self.obs_rms = RunningMeanStd(shape=obs_space.shape)
@@ -26,13 +32,14 @@ class bi_direction_lstm(object):
         outputs, output_state = tf.nn.bidirectional_dynamic_rnn(lstm_fw_cell, lstm_bw_cell, obz, dtype=tf.float32)
         outputs_average = tf.reduce_mean(outputs[0], axis=1)
         if gaussian_fixed_var and isinstance(laten_size, int):
-            self.mean = U.dense(outputs_average, pdtype.param_shape()[0] // 2, "dblstmfin", U.normc_initializer(0.01))
-            self.logstd = tf.get_variable(name="logstd", shape=[1, pdtype.param_shape()[0] // 2],
-                                     initializer=tf.constant_initializer(0.1))
+            self.mean = U.dense(outputs_average, pdtype.param_shape()[0] // 2, "dblstmfin", U.normc_initializer(1.0))
+            self.logstd = U.dense(outputs_average,  pdtype.param_shape()[0] // 2, "dblstm_logstd", U.normc_initializer(1.0))
+            # self.logstd = tf.get_variable(name="logstd", shape=[1, pdtype.param_shape()[0] // 2],
+            #                          initializer=tf.constant_initializer(0.1)) ##这个地方是不是也是有问题的
             pdparam = U.concatenate([self.mean, self.mean * 0.0 + self.logstd], axis=1)
 
         else:
-            pdparam = U.dense(outputs_average, pdtype.param_shape()[0], "dblstmfin", U.normc_initializer(0.01))
+            pdparam = U.dense(outputs_average, pdtype.param_shape()[0], "dblstmfin", U.normc_initializer(0.1))
 
         self.pd = pdtype.pdfromflat(pdparam)
         self._encode = U.function([obs], self.pd.sample())

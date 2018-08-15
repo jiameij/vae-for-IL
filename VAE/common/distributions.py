@@ -195,6 +195,9 @@ class DiagGaussianPd(Pd):
         return 0.5 * U.sum(tf.square((x - self.mean) / self.std), axis=-1) \
                + 0.5 * np.log(2.0 * np.pi) * tf.to_float(tf.shape(x)[-1]) \
                + U.sum(self.logstd, axis=-1)
+    # def neglogp(self, x):
+    #     return 0.5 * U.sum(tf.square((x - self.mean) / self.std), axis=-1) \
+    #            + U.sum(self.logstd, axis=-1)
     def kl(self, other):
         assert isinstance(other, DiagGaussianPd)
         return U.sum(other.logstd - self.logstd + (tf.square(self.std) + tf.square(self.mean - other.mean)) / (2.0 * tf.square(other.std)) - 0.5, axis=-1)
